@@ -1,6 +1,6 @@
 use rand::{Rng, SeedableRng, rng, rngs::SmallRng};
 
-use crate::cards::{Card, Suit};
+use crate::cards::{Card, Hand, Suit};
 #[derive(Debug)]
 pub struct Deck {
     cards: Vec<Card>,
@@ -34,5 +34,13 @@ impl Deck {
             let swap = self.cards.swap_remove(i);
             self.cards.push(swap);
         }
+    }
+    pub fn remove(&mut self, card: Card) -> Option<Card> {
+        let index = self.cards.iter().position(|&item| item == card)?;
+        Some(self.cards.swap_remove(index))
+    }
+    pub fn draw_to_hand(&mut self, hand: &mut Hand) {
+        let card = self.cards.swap_remove(0);
+        hand.add(card);
     }
 }
