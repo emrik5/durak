@@ -13,6 +13,7 @@ use message::Message;
 
 mod cards;
 mod deck;
+mod error;
 mod message;
 mod net;
 mod player;
@@ -21,53 +22,53 @@ fn main() -> io::Result<()> {
     let mut deck = Deck::new(13);
     deck.shuffle();
 
-    // let vec = vec![
-    //     SocketAddrV4::from_str("127.0.0.1:1337").unwrap(),
-    //     SocketAddrV4::from_str("53.10.0.254:6666").unwrap(),
-    // ];
-    // let msg = message::ConnsList::new_from_vec(vec);
-    // {
-    //     let mut f = std::fs::File::create("test")?;
-    //     f.write(&msg.encode())?;
-    // }
-    // let mut f = std::fs::File::open("test")?;
-    // let mut buf = vec![];
-    // f.read_to_end(&mut buf)?;
-    // println!("{:?}", message::ConnsList::decode(&buf));
-
     let mut connections: Vec<TcpStream> = vec![];
-    let (listen_thread_send, listen_thread_recv) = mpsc::channel();
+    let (listen_conns_send, listen_conns_recv) = mpsc::channel();
+    let (listen_socks_send, listen_socks_recv) = mpsc::channel();
 
     println!("port:");
     let mut input_buf = String::new();
     io::stdin().read_line(&mut input_buf)?;
     let local_port: u16 = input_buf.trim().parse().unwrap();
     thread::spawn(move || {
-        let res = net::listen(local_port, listen_thread_send);
+        let res = net::listen(local_port, listen_conns_send, listen_socks_recv);
         println!("listen: {:?}", res);
     });
-    thread::sleep(Duration::from_secs(5));
     let mut input_buf = String::new();
     println!("c:");
     stdin().read_line(&mut input_buf)?;
-    if input_buf.trim() != "" {
+    let conns = if input_buf.trim() != "" {
         println!("connect");
         net::connect(
             Ipv4Addr::new(127, 0, 0, 1),
             input_buf.trim().parse().unwrap(),
             local_port,
-        )?;
-        return Ok(());
+        )
+    } else {
+        Ok(Vec::new())
     }
+    .unwrap_or_default();
+    net::send_sockets_to_listen(&listen_socks_send, &conns)?;
+    connections.extend(conns);
     loop {
-        if listen_thread_recv.try_recv().is_ok() {
-            let (conn, username) = listen_thread_recv
-                .recv()
-                .expect("Listen thread send deallocated");
-            connections.push(conn);
-        }
+        match listen_conns_recv.try_recv() {
+            Ok((conn, username)) => connections.push(conn),
+            _ => (),
+        };
+        println!(
+            "{:?}",
+            connections
+                .iter()
+                .filter_map(|e| e.peer_addr().ok())
+                .collect::<Vec<_>>()
+        );
+        let mut input_buf = String::new();
+        io::stdin().read_line(&mut input_buf)?;
         for conn in &mut connections {
-            conn.write_all(&"hello".as_bytes())?;
+            conn.write_all(input_buf.as_bytes())?;
+            let mut buf = Vec::with_capacity(10);
+            conn.read_exact(&mut buf)?;
+            println!("{}", String::from_utf8(buf).unwrap());
         }
         thread::sleep(Duration::from_secs(1));
     }

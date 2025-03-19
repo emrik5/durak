@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
-    str::FromStr,
     sync::mpsc,
 };
 
@@ -26,6 +25,9 @@ impl SocketList {
     pub fn push(&mut self, sock: SocketAddrV4) {
         self.sockets.push(sock);
     }
+    pub fn extend(&mut self, other: Vec<SocketAddrV4>) {
+        self.sockets.extend(other);
+    }
     pub fn all_as_bytes_v4(&self) -> Vec<u8> {
         let socks = &self.sockets;
         let mut buf = Vec::with_capacity(socks.len() * 6);
@@ -43,6 +45,9 @@ impl SocketList {
     }
     pub fn sockets(&self) -> &Vec<SocketAddrV4> {
         &self.sockets
+    }
+    pub fn len(&self) -> usize {
+        self.sockets.len()
     }
 }
 fn get_listener(port: u16) -> io::Result<TcpListener> {
@@ -65,15 +70,15 @@ pub fn verify_and_accept(
     };
     Ok((conn, msg, sock))
 }
-pub fn connect(addr: Ipv4Addr, remote_port: u16, local_port: u16) -> io::Result<()> {
+pub fn connect(addr: Ipv4Addr, remote_port: u16, local_port: u16) -> io::Result<Vec<TcpStream>> {
     let sock = SocketAddrV4::new(addr, remote_port);
     let mut conn = TcpStream::connect(sock)?;
     let msg = message::Init::new(message::InitKind::New, local_port, "pass", "uname");
     conn.write_all(&msg.encode()?)?;
     let msg = message::ConnsList::recv_and_decode(&mut conn)?;
-    connect_to_peers(&msg.consume_for_socket_list(), remote_port)?;
-    loop {}
-    Ok(())
+    let mut conns = connect_to_peers(&msg.consume_for_socket_list(), remote_port)?;
+    conns.push(conn);
+    Ok(conns)
 }
 pub fn establish_connection(
     conn: &mut TcpStream,
@@ -86,28 +91,50 @@ pub fn establish_connection(
         message::InitKind::Reconnect => todo!(),
     }
 }
-pub fn listen(port: u16, send: mpsc::Sender<(TcpStream, String)>) -> io::Result<()> {
+pub fn listen(
+    port: u16,
+    send: mpsc::Sender<(TcpStream, String)>,
+    recv: mpsc::Receiver<Vec<SocketAddrV4>>,
+) -> io::Result<()> {
     let mut sockets = SocketList::new_empty();
 
     loop {
         let listener = get_listener(port)?;
-        println!("listen: {:?}", listener);
         let (mut conn, init_msg, mut sock) = verify_and_accept(listener)?;
+        match recv.try_recv() {
+            Ok(socks) => sockets.extend(socks),
+            _ => {}
+        };
         establish_connection(&mut conn, &sockets, &init_msg)?;
-        println!("conn: {}", sock);
         sock.set_port(init_msg.listen_port());
         sockets.push(sock);
+        println!("conns: {:?}", sockets);
         send.send((conn, init_msg.consume_for_username()))
             .expect("Main thread data recv deallocated");
     }
     Ok(())
+}
+pub fn send_sockets_to_listen(
+    send: &mpsc::Sender<Vec<SocketAddrV4>>,
+    conns: &Vec<TcpStream>,
+) -> io::Result<()> {
+    let sockets: Vec<_> = conns
+        .iter()
+        .filter_map(|conn| conn.peer_addr().ok())
+        .filter_map(|sock| match sock {
+            SocketAddr::V4(addr) => Some(addr),
+            _ => None,
+        })
+        .collect();
+    send.send(sockets).map_err(|err| io::Error::other(err))
 }
 fn send_socket_list(conn: &mut TcpStream, sockets: &SocketList) -> io::Result<()> {
     let msg = message::ConnsList::new(sockets.clone());
     conn.write_all(&msg.encode()?)?;
     Ok(())
 }
-fn connect_to_peers(sockets: &SocketList, port: u16) -> io::Result<()> {
+fn connect_to_peers(sockets: &SocketList, port: u16) -> io::Result<Vec<TcpStream>> {
+    let mut conns = Vec::with_capacity(sockets.len());
     for &sock in sockets.sockets() {
         println!("try: {}", sock);
         let mut conn = match TcpStream::connect(sock) {
@@ -119,8 +146,9 @@ fn connect_to_peers(sockets: &SocketList, port: u16) -> io::Result<()> {
         };
         let msg = message::Init::new(message::InitKind::Referred, port, "ref", "refed");
         conn.write_all(&msg.encode()?)?;
+        conns.push(conn);
     }
-    Ok(())
+    Ok(conns)
 }
 fn accept_referred(conn: &mut TcpStream) -> io::Result<()> {
     conn.write_all("hello".as_bytes())
