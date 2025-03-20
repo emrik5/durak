@@ -1,0 +1,10 @@
+Client:
+	Cards on hand
+	Other player's count
+
+Msg:
+	A card pulled from deck
+	Card played
+
+Deck:
+	Encrypted?
